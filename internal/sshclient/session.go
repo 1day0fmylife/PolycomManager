@@ -116,7 +116,8 @@ func (s *Session) readLoop(r io.Reader) {
 			continue
 		}
 		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "notification:") {
+		if strings.HasPrefix(lower, "notification:") ||
+			strings.HasPrefix(lower, "control event:") {
 			if s.onNotify != nil {
 				s.onNotify(line)
 			}
@@ -141,6 +142,20 @@ func (s *Session) drain() {
 }
 
 func (s *Session) Execute(ctx context.Context, command string) ([]string, error) {
+	return s.execute(ctx, command, 6*time.Second, false)
+}
+
+// ExecuteOptional is for documented API commands that may not emit a response.
+// It captures a response if one arrives during wait, but treats an empty response
+// as success when that short grace period expires.
+func (s *Session) ExecuteOptional(ctx context.Context, command string, wait time.Duration) ([]string, error) {
+	if wait <= 0 {
+		wait = 500 * time.Millisecond
+	}
+	return s.execute(ctx, command, wait, true)
+}
+
+func (s *Session) execute(ctx context.Context, command string, responseTimeout time.Duration, allowNoResponse bool) ([]string, error) {
 	s.execMu.Lock()
 	defer s.execMu.Unlock()
 	command = strings.TrimSpace(command)
@@ -155,7 +170,7 @@ func (s *Session) Execute(ctx context.Context, command string) ([]string, error)
 		return nil, err
 	}
 
-	deadline := time.NewTimer(6 * time.Second)
+	deadline := time.NewTimer(responseTimeout)
 	defer deadline.Stop()
 	var idle *time.Timer
 	var idleC <-chan time.Time
@@ -169,6 +184,9 @@ func (s *Session) Execute(ctx context.Context, command string) ([]string, error)
 		case <-deadline.C:
 			if len(lines) > 0 {
 				return clean(lines, command), nil
+			}
+			if allowNoResponse {
+				return nil, nil
 			}
 			return nil, fmt.Errorf("timeout waiting for response to %q", command)
 		case line := <-s.lines:
