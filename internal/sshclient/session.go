@@ -14,6 +14,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	commandTimeout          = 6 * time.Second
+	responseIdleTimeout     = 50 * time.Millisecond
+	optionalIdleTimeout     = 20 * time.Millisecond
+	optionalResponseTimeout = 80 * time.Millisecond
+)
+
 type NotificationHandler func(line string)
 
 type Session struct {
@@ -141,29 +148,60 @@ func (s *Session) drain() {
 	}
 }
 
-func (s *Session) Execute(ctx context.Context, command string) ([]string, error) {
-	return s.execute(ctx, command, 6*time.Second, false)
-}
-
-// ExecuteOptional is for documented API commands that may not emit a response.
-// It captures a response if one arrives during wait, but treats an empty response
-// as success when that short grace period expires.
-func (s *Session) ExecuteOptional(ctx context.Context, command string, wait time.Duration) ([]string, error) {
-	if wait <= 0 {
-		wait = 500 * time.Millisecond
-	}
-	return s.execute(ctx, command, wait, true)
-}
-
-func (s *Session) execute(ctx context.Context, command string, responseTimeout time.Duration, allowNoResponse bool) ([]string, error) {
-	s.execMu.Lock()
-	defer s.execMu.Unlock()
+func validateCommand(command string) (string, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		return nil, errors.New("empty command")
+		return "", errors.New("empty command")
 	}
 	if strings.ContainsAny(command, "\r\n\x00") {
-		return nil, errors.New("command contains control characters")
+		return "", errors.New("command contains control characters")
+	}
+	return command, nil
+}
+
+func (s *Session) Execute(ctx context.Context, command string) ([]string, error) {
+	return s.execute(ctx, command, commandTimeout, responseIdleTimeout, false)
+}
+
+// ExecuteOptional is intended for latency-sensitive commands whose firmware
+// may return either a short acknowledgement or no response at all.
+func (s *Session) ExecuteOptional(ctx context.Context, command string, wait time.Duration) ([]string, error) {
+	if wait <= 0 {
+		wait = optionalResponseTimeout
+	}
+	return s.execute(ctx, command, wait, optionalIdleTimeout, true)
+}
+
+// ExecuteNoWait writes a command to the existing persistent SSH API session and
+// returns as soon as the write succeeds. The next command drains any late
+// acknowledgement before being sent. Use only for documented commands whose
+// response is optional, such as camera <near|far> stop.
+func (s *Session) ExecuteNoWait(ctx context.Context, command string) error {
+	s.execMu.Lock()
+	defer s.execMu.Unlock()
+
+	command, err := validateCommand(command)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	s.drain()
+	_, err = io.WriteString(s.stdin, command+"\r")
+	return err
+}
+
+func (s *Session) execute(ctx context.Context, command string, responseTimeout, idleTimeout time.Duration, allowNoResponse bool) ([]string, error) {
+	s.execMu.Lock()
+	defer s.execMu.Unlock()
+
+	command, err := validateCommand(command)
+	if err != nil {
+		return nil, err
 	}
 	s.drain()
 	if _, err := io.WriteString(s.stdin, command+"\r"); err != nil {
@@ -192,7 +230,7 @@ func (s *Session) execute(ctx context.Context, command string, responseTimeout t
 		case line := <-s.lines:
 			lines = append(lines, line)
 			if idle == nil {
-				idle = time.NewTimer(220 * time.Millisecond)
+				idle = time.NewTimer(idleTimeout)
 			} else {
 				if !idle.Stop() {
 					select {
@@ -200,7 +238,7 @@ func (s *Session) execute(ctx context.Context, command string, responseTimeout t
 					default:
 					}
 				}
-				idle.Reset(220 * time.Millisecond)
+				idle.Reset(idleTimeout)
 			}
 			idleC = idle.C
 		case <-idleC:
