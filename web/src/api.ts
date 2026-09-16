@@ -21,6 +21,11 @@ export const api = {
   hangup: (id: string) => request(`/api/v1/devices/${id}/hangup`, { method: 'POST' }),
   mute: (id: string, muted: boolean) => request(`/api/v1/devices/${id}/mute`, { method: 'POST', body: JSON.stringify({ muted }) }),
   volume: (id: string, volume: number) => request(`/api/v1/devices/${id}/volume`, { method: 'POST', body: JSON.stringify({ volume }) }),
+  cameraSelect: (id: string, site: 'near' | 'far', source: number) => request(`/api/v1/devices/${id}/camera/select`, { method: 'POST', body: JSON.stringify({ site, source }) }),
+  cameraMove: (id: string, site: 'near' | 'far', direction: string) => request(`/api/v1/devices/${id}/camera/move`, { method: 'POST', body: JSON.stringify({ site, direction }) }),
+  cameraPreset: (id: string, site: 'near' | 'far', action: 'go' | 'set', preset: number) => request(`/api/v1/devices/${id}/camera/preset`, { method: 'POST', body: JSON.stringify({ site, action, preset }) }),
+  dtmf: (id: string, digit: string) => request(`/api/v1/devices/${id}/dtmf`, { method: 'POST', body: JSON.stringify({ digit }) }),
+  content: (id: string, action: 'play' | 'stop', source = 0) => request(`/api/v1/devices/${id}/content`, { method: 'POST', body: JSON.stringify({ action, source }) }),
   command: (id: string, command: string) => request<{ output: string[] }>(`/api/v1/devices/${id}/command`, { method: 'POST', body: JSON.stringify({ command }) }),
   audit: () => request<AuditEntry[]>('/api/v1/audit?limit=200'),
 }
