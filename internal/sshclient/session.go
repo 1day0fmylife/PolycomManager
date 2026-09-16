@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -30,8 +31,9 @@ type Session struct {
 	lines   chan string
 	done    chan struct{}
 
-	execMu   sync.Mutex
-	onNotify NotificationHandler
+	execMu             sync.Mutex
+	interactiveWaiters atomic.Int32
+	onNotify           NotificationHandler
 }
 
 type DialConfig struct {
@@ -99,7 +101,6 @@ func Dial(ctx context.Context, cfg DialConfig) (*Session, error) {
 
 	s := &Session{client: client, session: sess, stdin: stdin, lines: make(chan string, 256), done: make(chan struct{}), onNotify: cfg.OnNotify}
 	go s.readLoop(io.MultiReader(stdout, stderr))
-	// Let banners/prompts arrive, then discard them so the first command result is clean.
 	t := time.NewTimer(350 * time.Millisecond)
 	select {
 	case <-ctx.Done():
@@ -123,8 +124,7 @@ func (s *Session) readLoop(r io.Reader) {
 			continue
 		}
 		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "notification:") ||
-			strings.HasPrefix(lower, "control event:") {
+		if strings.HasPrefix(lower, "notification:") || strings.HasPrefix(lower, "control event:") {
 			if s.onNotify != nil {
 				s.onNotify(line)
 			}
@@ -159,12 +159,48 @@ func validateCommand(command string) (string, error) {
 	return command, nil
 }
 
+func isLatencySensitive(command string) bool {
+	c := strings.ToLower(strings.TrimSpace(command))
+	for _, prefix := range []string{
+		"camera ", "preset ", "gendial ", "volume set ", "mute near ",
+		"dial ", "hangup ", "vcbutton play", "vcbutton stop",
+	} {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Session) lockCommand(ctx context.Context, command string) error {
+	interactive := isLatencySensitive(command)
+	if interactive {
+		s.interactiveWaiters.Add(1)
+		defer s.interactiveWaiters.Add(-1)
+		s.execMu.Lock()
+		return nil
+	}
+
+	// Background/status commands yield between requests while an interactive
+	// command is waiting. This prevents a multi-command refresh from monopolizing
+	// the single persistent Polycom API session.
+	for s.interactiveWaiters.Load() > 0 {
+		t := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+	s.execMu.Lock()
+	return nil
+}
+
 func (s *Session) Execute(ctx context.Context, command string) ([]string, error) {
 	return s.execute(ctx, command, commandTimeout, responseIdleTimeout, false)
 }
 
-// ExecuteOptional is intended for latency-sensitive commands whose firmware
-// may return either a short acknowledgement or no response at all.
 func (s *Session) ExecuteOptional(ctx context.Context, command string, wait time.Duration) ([]string, error) {
 	if wait <= 0 {
 		wait = optionalResponseTimeout
@@ -172,37 +208,36 @@ func (s *Session) ExecuteOptional(ctx context.Context, command string, wait time
 	return s.execute(ctx, command, wait, optionalIdleTimeout, true)
 }
 
-// ExecuteNoWait writes a command to the existing persistent SSH API session and
-// returns as soon as the write succeeds. The next command drains any late
-// acknowledgement before being sent. Use only for documented commands whose
-// response is optional, such as camera <near|far> stop.
 func (s *Session) ExecuteNoWait(ctx context.Context, command string) error {
-	s.execMu.Lock()
-	defer s.execMu.Unlock()
-
 	command, err := validateCommand(command)
 	if err != nil {
 		return err
 	}
+	if err := s.lockCommand(ctx, command); err != nil {
+		return err
+	}
+	defer s.execMu.Unlock()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-
 	s.drain()
 	_, err = io.WriteString(s.stdin, command+"\r")
 	return err
 }
 
 func (s *Session) execute(ctx context.Context, command string, responseTimeout, idleTimeout time.Duration, allowNoResponse bool) ([]string, error) {
-	s.execMu.Lock()
-	defer s.execMu.Unlock()
-
 	command, err := validateCommand(command)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.lockCommand(ctx, command); err != nil {
+		return nil, err
+	}
+	defer s.execMu.Unlock()
+
 	s.drain()
 	if _, err := io.WriteString(s.stdin, command+"\r"); err != nil {
 		return nil, err
