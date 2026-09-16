@@ -9,9 +9,17 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+)
+
+const (
+	commandTimeout          = 6 * time.Second
+	responseIdleTimeout     = 50 * time.Millisecond
+	optionalIdleTimeout     = 20 * time.Millisecond
+	optionalResponseTimeout = 80 * time.Millisecond
 )
 
 type NotificationHandler func(line string)
@@ -23,8 +31,9 @@ type Session struct {
 	lines   chan string
 	done    chan struct{}
 
-	execMu   sync.Mutex
-	onNotify NotificationHandler
+	execMu             sync.Mutex
+	interactiveWaiters atomic.Int32
+	onNotify           NotificationHandler
 }
 
 type DialConfig struct {
@@ -92,7 +101,6 @@ func Dial(ctx context.Context, cfg DialConfig) (*Session, error) {
 
 	s := &Session{client: client, session: sess, stdin: stdin, lines: make(chan string, 256), done: make(chan struct{}), onNotify: cfg.OnNotify}
 	go s.readLoop(io.MultiReader(stdout, stderr))
-	// Let banners/prompts arrive, then discard them so the first command result is clean.
 	t := time.NewTimer(350 * time.Millisecond)
 	select {
 	case <-ctx.Done():
@@ -116,8 +124,7 @@ func (s *Session) readLoop(r io.Reader) {
 			continue
 		}
 		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "notification:") ||
-			strings.HasPrefix(lower, "control event:") {
+		if strings.HasPrefix(lower, "notification:") || strings.HasPrefix(lower, "control event:") {
 			if s.onNotify != nil {
 				s.onNotify(line)
 			}
@@ -141,30 +148,91 @@ func (s *Session) drain() {
 	}
 }
 
-func (s *Session) Execute(ctx context.Context, command string) ([]string, error) {
-	return s.execute(ctx, command, 6*time.Second, false)
-}
-
-// ExecuteOptional is for documented API commands that may not emit a response.
-// It captures a response if one arrives during wait, but treats an empty response
-// as success when that short grace period expires.
-func (s *Session) ExecuteOptional(ctx context.Context, command string, wait time.Duration) ([]string, error) {
-	if wait <= 0 {
-		wait = 500 * time.Millisecond
-	}
-	return s.execute(ctx, command, wait, true)
-}
-
-func (s *Session) execute(ctx context.Context, command string, responseTimeout time.Duration, allowNoResponse bool) ([]string, error) {
-	s.execMu.Lock()
-	defer s.execMu.Unlock()
+func validateCommand(command string) (string, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		return nil, errors.New("empty command")
+		return "", errors.New("empty command")
 	}
 	if strings.ContainsAny(command, "\r\n\x00") {
-		return nil, errors.New("command contains control characters")
+		return "", errors.New("command contains control characters")
 	}
+	return command, nil
+}
+
+func isLatencySensitive(command string) bool {
+	c := strings.ToLower(strings.TrimSpace(command))
+	for _, prefix := range []string{
+		"camera ", "preset ", "gendial ", "volume set ", "mute near ",
+		"dial ", "hangup ", "vcbutton play", "vcbutton stop",
+	} {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Session) lockCommand(ctx context.Context, command string) error {
+	interactive := isLatencySensitive(command)
+	if interactive {
+		s.interactiveWaiters.Add(1)
+		defer s.interactiveWaiters.Add(-1)
+		s.execMu.Lock()
+		return nil
+	}
+	for s.interactiveWaiters.Load() > 0 {
+		t := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+	s.execMu.Lock()
+	return nil
+}
+
+func (s *Session) Execute(ctx context.Context, command string) ([]string, error) {
+	return s.execute(ctx, command, commandTimeout, responseIdleTimeout, false)
+}
+
+func (s *Session) ExecuteOptional(ctx context.Context, command string, wait time.Duration) ([]string, error) {
+	if wait <= 0 {
+		wait = optionalResponseTimeout
+	}
+	return s.execute(ctx, command, wait, optionalIdleTimeout, true)
+}
+
+func (s *Session) ExecuteNoWait(ctx context.Context, command string) error {
+	command, err := validateCommand(command)
+	if err != nil {
+		return err
+	}
+	if err := s.lockCommand(ctx, command); err != nil {
+		return err
+	}
+	defer s.execMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	s.drain()
+	_, err = io.WriteString(s.stdin, command+"\r")
+	return err
+}
+
+func (s *Session) execute(ctx context.Context, command string, responseTimeout, idleTimeout time.Duration, allowNoResponse bool) ([]string, error) {
+	command, err := validateCommand(command)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.lockCommand(ctx, command); err != nil {
+		return nil, err
+	}
+	defer s.execMu.Unlock()
+
 	s.drain()
 	if _, err := io.WriteString(s.stdin, command+"\r"); err != nil {
 		return nil, err
@@ -192,7 +260,7 @@ func (s *Session) execute(ctx context.Context, command string, responseTimeout t
 		case line := <-s.lines:
 			lines = append(lines, line)
 			if idle == nil {
-				idle = time.NewTimer(220 * time.Millisecond)
+				idle = time.NewTimer(idleTimeout)
 			} else {
 				if !idle.Stop() {
 					select {
@@ -200,7 +268,7 @@ func (s *Session) execute(ctx context.Context, command string, responseTimeout t
 					default:
 					}
 				}
-				idle.Reset(220 * time.Millisecond)
+				idle.Reset(idleTimeout)
 			}
 			idleC = idle.C
 		case <-idleC:
