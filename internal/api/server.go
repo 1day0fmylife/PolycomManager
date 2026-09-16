@@ -55,6 +55,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/devices/{id}/hangup", s.hangup)
 	mux.HandleFunc("POST /api/v1/devices/{id}/mute", s.mute)
 	mux.HandleFunc("POST /api/v1/devices/{id}/volume", s.volume)
+	mux.HandleFunc("POST /api/v1/devices/{id}/camera/select", s.cameraSelect)
+	mux.HandleFunc("POST /api/v1/devices/{id}/camera/move", s.cameraMove)
+	mux.HandleFunc("POST /api/v1/devices/{id}/camera/preset", s.cameraPreset)
+	mux.HandleFunc("POST /api/v1/devices/{id}/dtmf", s.dtmf)
+	mux.HandleFunc("POST /api/v1/devices/{id}/content", s.content)
 	mux.HandleFunc("POST /api/v1/devices/{id}/command", s.command)
 	mux.HandleFunc("GET /api/v1/audit", s.audit)
 	mux.HandleFunc("GET /api/v1/events", s.sse)
@@ -182,6 +187,81 @@ func (s *Server) volume(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
+func (s *Server) cameraSelect(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Site   string `json:"site"`
+		Source int    `json:"source"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if e := s.manager.CameraSelect(r.Context(), r.PathValue("id"), strings.ToLower(strings.TrimSpace(in.Site)), in.Source); e != nil {
+		writeError(w, e, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) cameraMove(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Site      string `json:"site"`
+		Direction string `json:"direction"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if e := s.manager.CameraMove(r.Context(), r.PathValue("id"), strings.ToLower(strings.TrimSpace(in.Site)), strings.ToLower(strings.TrimSpace(in.Direction))); e != nil {
+		writeError(w, e, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) cameraPreset(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Site   string `json:"site"`
+		Action string `json:"action"`
+		Preset int    `json:"preset"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if e := s.manager.CameraPreset(r.Context(), r.PathValue("id"), strings.ToLower(strings.TrimSpace(in.Site)), strings.ToLower(strings.TrimSpace(in.Action)), in.Preset); e != nil {
+		writeError(w, e, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) dtmf(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Digit string `json:"digit"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if e := s.manager.SendDTMF(r.Context(), r.PathValue("id"), strings.TrimSpace(in.Digit)); e != nil {
+		writeError(w, e, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) content(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Action string `json:"action"`
+		Source int    `json:"source"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if e := s.manager.Content(r.Context(), r.PathValue("id"), strings.ToLower(strings.TrimSpace(in.Action)), in.Source); e != nil {
+		writeError(w, e, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *Server) command(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Command string `json:"command"`
