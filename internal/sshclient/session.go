@@ -180,6 +180,10 @@ func (s *Session) lockCommand(ctx context.Context, command string) error {
 		s.execMu.Lock()
 		return nil
 	}
+
+	// Background/status commands yield between requests while an interactive
+	// command is waiting. This prevents a multi-command refresh from monopolizing
+	// the single persistent Polycom API session.
 	for s.interactiveWaiters.Load() > 0 {
 		t := time.NewTimer(time.Millisecond)
 		select {
@@ -213,6 +217,7 @@ func (s *Session) ExecuteNoWait(ctx context.Context, command string) error {
 		return err
 	}
 	defer s.execMu.Unlock()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
