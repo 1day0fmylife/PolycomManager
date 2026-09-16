@@ -77,19 +77,38 @@ func (i *UpsertInput) Validate(requirePassword bool) error {
 	return nil
 }
 
+type CallState struct {
+	CallID           string    `json:"call_id"`
+	FarSiteName      string    `json:"far_site_name,omitempty"`
+	FarSiteNumber    string    `json:"far_site_number,omitempty"`
+	Speed            string    `json:"speed,omitempty"`
+	ConnectionStatus string    `json:"connection_status,omitempty"`
+	MuteStatus       string    `json:"mute_status,omitempty"`
+	Direction        string    `json:"direction,omitempty"`
+	Type             string    `json:"type,omitempty"`
+	Protocol         string    `json:"protocol,omitempty"`
+	StartedAt        time.Time `json:"started_at,omitempty"`
+	DurationSeconds  int64     `json:"duration_seconds,omitempty"`
+}
+
 type RuntimeState struct {
-	Connection      string    `json:"connection"`
-	DetectedModel   string    `json:"detected_model,omitempty"`
-	SystemName      string    `json:"system_name,omitempty"`
-	Firmware        string    `json:"firmware,omitempty"`
-	Serial          string    `json:"serial,omitempty"`
-	CallState       string    `json:"call_state,omitempty"`
-	RemoteParty     string    `json:"remote_party,omitempty"`
-	Muted           *bool     `json:"muted,omitempty"`
-	Volume          *int      `json:"volume,omitempty"`
-	LastError       string    `json:"last_error,omitempty"`
-	LastSeenAt      time.Time `json:"last_seen_at,omitempty"`
-	LastConnectedAt time.Time `json:"last_connected_at,omitempty"`
+	Connection       string      `json:"connection"`
+	DetectedModel    string      `json:"detected_model,omitempty"`
+	SystemName       string      `json:"system_name,omitempty"`
+	Firmware         string      `json:"firmware,omitempty"`
+	Serial           string      `json:"serial,omitempty"`
+	CallState        string      `json:"call_state,omitempty"`
+	RemoteParty      string      `json:"remote_party,omitempty"`
+	Calls            []CallState `json:"calls,omitempty"`
+	Muted            *bool       `json:"muted,omitempty"`
+	Volume           *int        `json:"volume,omitempty"`
+	ContentState     string      `json:"content_state,omitempty"`
+	ContentSource    int         `json:"content_source,omitempty"`
+	NearCameraSource int         `json:"near_camera_source,omitempty"`
+	FarCameraSource  int         `json:"far_camera_source,omitempty"`
+	LastError        string      `json:"last_error,omitempty"`
+	LastSeenAt       time.Time   `json:"last_seen_at,omitempty"`
+	LastConnectedAt  time.Time   `json:"last_connected_at,omitempty"`
 }
 
 type DeviceView struct {

@@ -14,10 +14,14 @@ MVP для централизованного управления нескол�
 - TOFU SSH host-key store с обнаружением изменившегося ключа;
 - зашифрованное хранение SSH-паролей (XChaCha20-Poly1305);
 - автоматическое определение модели через `systemsetting get model`;
-- получение system name, firmware, serial и состояния вызова;
-- `dial`, `hangup`, `mute`, `volume`;
+- получение system name, firmware, serial и runtime-состояния;
+- все call legs из `callinfo all` с bitrate/state/mute/direction/type и наблюдаемой длительностью;
+- `dial`, `hangup`, `mute`, `volume`, DTMF;
+- Camera/PTZ, near/far camera selection и presets;
+- Content Sharing: start/stop/source;
+- Dashboard мониторинга нескольких терминалов;
 - Raw API console;
-- уведомления `callstatus`, `mutestatus`, `sysstatus`;
+- уведомления `callstatus`, `mutestatus`, `sysstatus`, video/content events;
 - журнал аудита;
 - REST API + Server-Sent Events;
 - React/Vite UI, встраиваемый в Go через `go:embed`;
@@ -150,6 +154,8 @@ session name <name>
 notify callstatus
 notify mutestatus
 notify sysstatus
+notify vidsourcechanges
+vcbutton register
 systemsetting get model
 systemname get
 version
@@ -161,6 +167,16 @@ volume get
 volume set 0..50
 dial manual <speed> "<destination>" sip
 hangup all
+camera <near|far> <1..4>
+camera <near|far> move <left|right|up|down|zoom+|zoom->
+camera <near|far> stop
+preset near <go|set> <0..99>
+preset far <go|set> <0..15>
+gendial <0..9|*|#>
+vcbutton play <source>
+vcbutton stop
+vcbutton get
+vcbutton source get
 ```
 
 Для вызова используется SIP и скорость по умолчанию `512`.
@@ -183,6 +199,11 @@ POST   /api/v1/devices/{id}/dial
 POST   /api/v1/devices/{id}/hangup
 POST   /api/v1/devices/{id}/mute
 POST   /api/v1/devices/{id}/volume
+POST   /api/v1/devices/{id}/camera/select
+POST   /api/v1/devices/{id}/camera/move
+POST   /api/v1/devices/{id}/camera/preset
+POST   /api/v1/devices/{id}/dtmf
+POST   /api/v1/devices/{id}/content
 POST   /api/v1/devices/{id}/command
 GET    /api/v1/audit
 GET    /api/v1/events
@@ -232,4 +253,10 @@ web/                       React/Vite source
 - Web terminal реализован как безопасная Raw API Console, а не полноценный PTY/xterm multiplexing.
 - Нет встроенной пользовательской аутентификации/RBAC; приложение по умолчанию loopback-only.
 - Парсер call info рассчитан на документированный формат Group Series и должен быть проверен на ваших конкретных firmware versions.
-- Для multipoint UI сейчас показывает первый активный call; API parser возвращает все call entries и его легко расширить.
+- Индивидуальный hangup конкретного multipoint call leg пока не реализован; текущий `hangup` завершает все вызовы.
+- Длительность call leg — наблюдаемая Manager длительность с момента первого обнаружения Call ID, а не гарантированное значение от терминала.
+- Фактическая доступность camera/content inputs зависит не только от модели, но и от конфигурации входов конкретного терминала.
+
+## Roadmap
+
+Согласованный план развития находится в [`PLAN.md`](PLAN.md).

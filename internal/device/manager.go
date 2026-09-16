@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +105,7 @@ func (m *Manager) State(id string) RuntimeState {
 	defer m.mu.RUnlock()
 	return m.states[id]
 }
+
 func (m *Manager) Views(devices []Device) []DeviceView {
 	out := make([]DeviceView, 0, len(devices))
 	for _, d := range devices {
@@ -120,6 +122,7 @@ func (m *Manager) updateState(id string, fn func(*RuntimeState)) {
 	m.mu.Unlock()
 	m.publish(id, "device.state", s)
 }
+
 func (m *Manager) publish(id, typ string, data any) {
 	m.events.Publish(events.Event{Type: typ, DeviceID: id, Data: data})
 }
@@ -133,6 +136,7 @@ func (m *Manager) worker(id string) (*Worker, error) {
 	}
 	return w, nil
 }
+
 func (m *Manager) Raw(ctx context.Context, id, cmd string) ([]string, error) {
 	w, e := m.worker(id)
 	if e != nil {
@@ -140,6 +144,7 @@ func (m *Manager) Raw(ctx context.Context, id, cmd string) ([]string, error) {
 	}
 	return w.Raw(ctx, cmd)
 }
+
 func (m *Manager) Dial(ctx context.Context, id, dst string, speed int) error {
 	w, e := m.worker(id)
 	if e != nil {
@@ -147,6 +152,7 @@ func (m *Manager) Dial(ctx context.Context, id, dst string, speed int) error {
 	}
 	return w.Do(ctx, "dial", func(c *polycom.Client) error { return c.Dial(ctx, dst, speed) })
 }
+
 func (m *Manager) Hangup(ctx context.Context, id string) error {
 	w, e := m.worker(id)
 	if e != nil {
@@ -154,6 +160,7 @@ func (m *Manager) Hangup(ctx context.Context, id string) error {
 	}
 	return w.Do(ctx, "hangup", func(c *polycom.Client) error { return c.Hangup(ctx) })
 }
+
 func (m *Manager) SetMute(ctx context.Context, id string, v bool) error {
 	w, e := m.worker(id)
 	if e != nil {
@@ -161,12 +168,60 @@ func (m *Manager) SetMute(ctx context.Context, id string, v bool) error {
 	}
 	return w.Do(ctx, "mute", func(c *polycom.Client) error { return c.SetMute(ctx, v) })
 }
+
 func (m *Manager) SetVolume(ctx context.Context, id string, v int) error {
 	w, e := m.worker(id)
 	if e != nil {
 		return e
 	}
 	return w.Do(ctx, "volume", func(c *polycom.Client) error { return c.SetVolume(ctx, v) })
+}
+
+func (m *Manager) CameraSelect(ctx context.Context, id, site string, source int) error {
+	w, e := m.worker(id)
+	if e != nil {
+		return e
+	}
+	return w.Do(ctx, "camera.select", func(c *polycom.Client) error { return c.SelectCamera(ctx, site, source) })
+}
+
+func (m *Manager) CameraMove(ctx context.Context, id, site, direction string) error {
+	w, e := m.worker(id)
+	if e != nil {
+		return e
+	}
+	return w.Do(ctx, "camera.move", func(c *polycom.Client) error { return c.CameraMove(ctx, site, direction) })
+}
+
+func (m *Manager) CameraPreset(ctx context.Context, id, site, action string, preset int) error {
+	w, e := m.worker(id)
+	if e != nil {
+		return e
+	}
+	return w.Do(ctx, "camera.preset", func(c *polycom.Client) error { return c.CameraPreset(ctx, site, action, preset) })
+}
+
+func (m *Manager) SendDTMF(ctx context.Context, id, digit string) error {
+	w, e := m.worker(id)
+	if e != nil {
+		return e
+	}
+	return w.Do(ctx, "dtmf", func(c *polycom.Client) error { return c.SendDTMF(ctx, digit) })
+}
+
+func (m *Manager) Content(ctx context.Context, id, action string, source int) error {
+	w, e := m.worker(id)
+	if e != nil {
+		return e
+	}
+	switch action {
+	case "play":
+		return w.Do(ctx, "content.play", func(c *polycom.Client) error { return c.StartContent(ctx, source) })
+	case "stop":
+		return w.Do(ctx, "content.stop", func(c *polycom.Client) error { return c.StopContent(ctx) })
+	default:
+		return errors.New("content action must be play or stop")
+	}
 }
 
 type Worker struct {
@@ -310,8 +365,21 @@ func (w *Worker) refresh(ctx context.Context) error {
 	}
 	muted, _ := c.MuteState(ctx)
 	volume, _ := c.Volume(ctx)
+	content, _ := c.ContentStatus(ctx)
+	nearSource, _ := c.CameraSource(ctx, "near")
+	farSource := 0
+	if len(calls) > 0 {
+		farSource, _ = c.CameraSource(ctx, "far")
+	}
 	now := time.Now().UTC()
 	w.update(w.device.ID, func(s *RuntimeState) {
+		oldStarts := make(map[string]time.Time, len(s.Calls))
+		for _, call := range s.Calls {
+			if !call.StartedAt.IsZero() {
+				oldStarts[call.CallID] = call.StartedAt
+			}
+		}
+
 		s.DetectedModel = info.Model
 		s.SystemName = info.SystemName
 		s.Firmware = info.Firmware
@@ -319,13 +387,38 @@ func (w *Worker) refresh(ctx context.Context) error {
 		s.LastSeenAt = now
 		s.Muted = muted
 		s.Volume = volume
+		s.ContentState = content.State
+		s.ContentSource = content.Source
+		s.NearCameraSource = nearSource
+		s.FarCameraSource = farSource
 		s.CallState = "idle"
 		s.RemoteParty = ""
-		if len(calls) > 0 {
-			s.CallState = calls[0].ConnectionStatus
-			s.RemoteParty = calls[0].FarSiteName
+		s.Calls = make([]CallState, 0, len(calls))
+		for _, call := range calls {
+			started := oldStarts[call.CallID]
+			if started.IsZero() {
+				started = now
+			}
+			view := CallState{
+				CallID:           call.CallID,
+				FarSiteName:      call.FarSiteName,
+				FarSiteNumber:    call.FarSiteNumber,
+				Speed:            call.Speed,
+				ConnectionStatus: call.ConnectionStatus,
+				MuteStatus:       call.MuteStatus,
+				Direction:        call.Direction,
+				Type:             call.Type,
+				Protocol:         inferProtocol(call.FarSiteNumber),
+				StartedAt:        started,
+				DurationSeconds:  int64(now.Sub(started).Seconds()),
+			}
+			s.Calls = append(s.Calls, view)
+		}
+		if len(s.Calls) > 0 {
+			s.CallState = s.Calls[0].ConnectionStatus
+			s.RemoteParty = s.Calls[0].FarSiteName
 			if s.RemoteParty == "" {
-				s.RemoteParty = calls[0].FarSiteNumber
+				s.RemoteParty = s.Calls[0].FarSiteNumber
 			}
 		}
 	})
@@ -347,6 +440,7 @@ func (w *Worker) Raw(ctx context.Context, cmd string) ([]string, error) {
 	_ = w.repo.AddAudit(context.Background(), w.device.ID, "raw", cmd, res, detail)
 	return lines, e
 }
+
 func (w *Worker) Do(ctx context.Context, op string, fn func(*polycom.Client) error) error {
 	c, e := w.current()
 	if e != nil {
@@ -362,7 +456,7 @@ func (w *Worker) Do(ctx context.Context, op string, fn func(*polycom.Client) err
 	_ = w.repo.AddAudit(context.Background(), w.device.ID, op, "", res, detail)
 	if e == nil {
 		go func() {
-			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()
 			_ = w.refresh(cctx)
 		}()
@@ -371,7 +465,7 @@ func (w *Worker) Do(ctx context.Context, op string, fn func(*polycom.Client) err
 }
 
 func (w *Worker) onNotification(line string) {
-	lower := strings.ToLower(line)
+	lower := strings.ToLower(strings.TrimSpace(line))
 	w.update(w.device.ID, func(s *RuntimeState) {
 		s.LastSeenAt = time.Now().UTC()
 		if strings.HasPrefix(lower, "notification:callstatus:") {
@@ -387,9 +481,37 @@ func (w *Worker) onNotification(line string) {
 			v := strings.Contains(lower, "muted") && !strings.Contains(lower, "unmuted")
 			s.Muted = &v
 		}
+		if strings.HasPrefix(lower, "control event: vcbutton play") {
+			s.ContentState = "play"
+		}
+		if strings.HasPrefix(lower, "control event: vcbutton stop") {
+			s.ContentState = "stop"
+			s.ContentSource = 0
+		}
+		if strings.HasPrefix(lower, "control event: vcbutton source ") {
+			value := strings.TrimSpace(strings.TrimPrefix(lower, "control event: vcbutton source "))
+			if n, err := strconv.Atoi(value); err == nil {
+				s.ContentSource = n
+			}
+		}
 	})
 	w.publish(w.device.ID, "polycom.notification", line)
 }
+
+func inferProtocol(number string) string {
+	v := strings.ToLower(strings.TrimSpace(number))
+	switch {
+	case strings.HasPrefix(v, "sip:") || strings.Contains(v, "@"):
+		return "SIP"
+	case strings.HasPrefix(v, "h323:"):
+		return "H.323"
+	case net.ParseIP(v) != nil:
+		return "IP"
+	default:
+		return ""
+	}
+}
+
 func shortID(v string) string {
 	if len(v) > 10 {
 		return v[:10]

@@ -1,3 +1,17 @@
+export type RuntimeCall = {
+  call_id: string
+  far_site_name?: string
+  far_site_number?: string
+  speed?: string
+  connection_status?: string
+  mute_status?: string
+  direction?: string
+  type?: string
+  protocol?: string
+  started_at?: string
+  duration_seconds?: number
+}
+
 export type RuntimeState = {
   connection: string
   detected_model?: string
@@ -6,8 +20,13 @@ export type RuntimeState = {
   serial?: string
   call_state?: string
   remote_party?: string
+  calls?: RuntimeCall[]
   muted?: boolean
   volume?: number
+  content_state?: string
+  content_source?: number
+  near_camera_source?: number
+  far_camera_source?: number
   last_error?: string
   last_seen_at?: string
   last_connected_at?: string
