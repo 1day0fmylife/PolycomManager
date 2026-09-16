@@ -1,108 +1,46 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { FormEvent, PointerEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
-import type { AuditEntry, Device, DeviceInput } from './types'
+import type { AuditEntry, Device, DeviceInput, RuntimeCall } from './types'
 
-const empty: DeviceInput = { name: '', host: '', port: 22, model: 'auto', location: '', username: 'admin', password: '', enabled: true }
+type Page='dashboard'|'devices'|'audit'; type Tab='overview'|'call'|'camera'|'content'|'system'|'console'
+const empty:DeviceInput={name:'',host:'',port:22,model:'auto',location:'',username:'admin',password:'',enabled:true}
+const cls=(s?:string)=>s==='connected'?'ok':s==='connecting'||s==='reconnecting'?'warn':s==='auth_error'||s==='error'?'bad':'off'
+const Dot=({s}:{s?:string})=><span className={`dot ${cls(s)}`}/>
+const duration=(v=0)=>{const h=Math.floor(v/3600),m=Math.floor(v%3600/60),s=v%60;return(h?[h,m,s]:[m,s]).map(x=>String(x).padStart(2,'0')).join(':')}
+const family=(d:Device)=>{const s=`${d.runtime.detected_model||''} ${d.model}`.toLowerCase();return s.includes('700')?'group700':s.includes('500')||s.includes('550')?'group500':s.includes('300')||s.includes('310')?'group300':d.model}
+const caps=(d:Device)=>family(d)==='group700'?{cam:[1,2,3,4],content:[1,2,3,4,6]}:family(d)==='group500'?{cam:[1,2],content:[1,2,6]}:{cam:[1],content:[6]}
 
-function statusClass(state?: string) {
-  if (state === 'connected') return 'ok'
-  if (state === 'connecting' || state === 'reconnecting') return 'warn'
-  if (state === 'auth_error') return 'bad'
-  return 'off'
+function DeviceModal({device,close,saved}:{device?:Device;close:()=>void;saved:()=>void}){
+ const [f,setF]=useState<DeviceInput>(()=>device?{name:device.name,host:device.host,port:device.port,model:device.model,location:device.location||'',username:device.username,password:'',enabled:device.enabled}:empty),[err,setErr]=useState(''),[busy,setBusy]=useState(false)
+ const set=(k:keyof DeviceInput,v:unknown)=>setF(x=>({...x,[k]:v}))
+ async function submit(e:FormEvent){e.preventDefault();setBusy(true);setErr('');try{device?await api.update(device.id,f):await api.create(f);saved();close()}catch(e){setErr(e instanceof Error?e.message:String(e))}finally{setBusy(false)}}
+ return <div className="modal-bg" onMouseDown={e=>e.target===e.currentTarget&&close()}><form className="modal" onSubmit={submit}><div className="head"><h2>{device?'Редактировать':'Добавить'} терминал</h2><button type="button" onClick={close}>×</button></div><div className="form-grid">
+  <label>Название<input value={f.name} onChange={e=>set('name',e.target.value)} required/></label><label>Расположение<input value={f.location} onChange={e=>set('location',e.target.value)}/></label><label>IP / hostname<input value={f.host} onChange={e=>set('host',e.target.value)} required/></label><label>SSH порт<input type="number" value={f.port} onChange={e=>set('port',+e.target.value)} min="1" max="65535"/></label>
+  <label>Модель<select value={f.model} onChange={e=>set('model',e.target.value)}><option value="auto">Auto</option><option value="group300">Group 300</option><option value="group500">Group 500</option><option value="group700">Group 700</option></select></label><label>SSH пользователь<input value={f.username} onChange={e=>set('username',e.target.value)} required/></label><label className="wide">{device?'Новый пароль (пусто = не менять)':'SSH пароль'}<input type="password" value={f.password} onChange={e=>set('password',e.target.value)} required={!device}/></label><label className="check wide"><input type="checkbox" checked={f.enabled} onChange={e=>set('enabled',e.target.checked)}/> Автоподключение</label>
+ </div>{err&&<div className="error">{err}</div>}<div className="actions"><button type="button" onClick={close}>Отмена</button><button className="primary" disabled={busy}>Сохранить</button></div></form></div>
 }
 
-function StateDot({ state }: { state?: string }) {
-  return <span className={`dot ${statusClass(state)}`} aria-hidden="true" />
+function Call({c}:{c:RuntimeCall}){return <div className="call"><div className="call-head"><b>{c.far_site_name||c.far_site_number||'Неизвестная сторона'}</b><span>{c.connection_status||'unknown'}</span></div><div className="facts"><div>Call ID<b>{c.call_id}</b></div><div>Адрес<b>{c.far_site_number||'—'}</b></div><div>Скорость<b>{c.speed?`${c.speed} kbps`:'—'}</b></div><div>Протокол<b>{c.protocol||'—'}</b></div><div>Направление<b>{c.direction||'—'}</b></div><div>Длительность*<b>{duration(c.duration_seconds)}</b></div></div></div>}
+
+function DevicePanel({d,close,edit,reload}:{d:Device;close:()=>void;edit:()=>void;reload:()=>void}){
+ const [tab,setTab]=useState<Tab>('overview'),[dest,setDest]=useState(''),[cmd,setCmd]=useState('callinfo all'),[out,setOut]=useState<string[]>([]),[err,setErr]=useState(''),[busy,setBusy]=useState(''),[site,setSite]=useState<'near'|'far'>('near'),[preset,setPreset]=useState(1)
+ const r=d.runtime,c=caps(d),connected=r.connection==='connected',inCall=(r.calls?.length||0)>0
+ const run=async(name:string,fn:()=>Promise<unknown>,refresh=true)=>{setBusy(name);setErr('');try{await fn();if(refresh)setTimeout(reload,300)}catch(e){setErr(e instanceof Error?e.message:String(e))}finally{setBusy('')}}
+ const move=async(dir:string)=>{try{await api.cameraMove(d.id,site,dir)}catch(e){setErr(e instanceof Error?e.message:String(e))}}
+ const hold=(dir:string)=>({onPointerDown:(e:PointerEvent<HTMLButtonElement>)=>{e.currentTarget.setPointerCapture(e.pointerId);void move(dir)},onPointerUp:()=>void move('stop'),onPointerCancel:()=>void move('stop'),onLostPointerCapture:()=>void move('stop')})
+ async function raw(e:FormEvent){e.preventDefault();await run('raw',async()=>{const x=await api.command(d.id,cmd);setOut(v=>[...v,`> ${cmd}`,...x.output].slice(-100))},false)}
+ const tabs:[Tab,string][]=[['overview','Обзор'],['call','Вызов'],['camera','Камера'],['content','Контент'],['system','Система'],['console','API Console']]
+ return <aside className="drawer"><div className="head"><div><small>{d.location||'Терминал'}</small><h2>{d.name}</h2><code>{d.host}:{d.port}</code></div><button onClick={close}>×</button></div><div className="status"><Dot s={r.connection}/><b>{r.connection}</b>{r.last_error&&<span>{r.last_error}</span>}</div><div className="tabs">{tabs.map(([k,l])=><button className={tab===k?'active':''} onClick={()=>setTab(k)} key={k}>{l}</button>)}</div>
+ {tab==='overview'&&<><div className="facts"><div>Модель<b>{r.detected_model||d.model}</b></div><div>Firmware<b>{r.firmware||'—'}</b></div><div>Serial<b>{r.serial||'—'}</b></div><div>System name<b>{r.system_name||'—'}</b></div><div>Вызовы<b>{r.calls?.length||0}</b></div><div>Контент<b>{r.content_state||'unknown'} {r.content_source?`#${r.content_source}`:''}</b></div></div><section><h3>Подключение</h3><div className="row"><button onClick={()=>run('connect',()=>api.connect(d.id))}>Подключить</button><button onClick={()=>run('disconnect',()=>api.disconnect(d.id))}>Отключить</button><button onClick={edit}>Изменить</button></div></section>{inCall&&<section><h3>Текущие вызовы</h3>{r.calls?.map(x=><Call c={x} key={x.call_id}/>)}</section>}</>}
+ {tab==='call'&&<><section className="first"><h3>Новый SIP-вызов</h3><div className="row"><input className="grow" value={dest} onChange={e=>setDest(e.target.value)} placeholder="sip:1001@example.local"/><button className="primary" disabled={!connected||!dest} onClick={()=>run('dial',()=>api.dial(d.id,dest))}>Вызов</button></div></section><section><h3>Активные соединения</h3>{r.calls?.length?r.calls.map(x=><Call c={x} key={x.call_id}/>):<p className="muted">Активных вызовов нет.</p>}</section><section><h3>Аудио</h3><div className="row"><button className="danger" disabled={!inCall} onClick={()=>run('hangup',()=>api.hangup(d.id))}>Завершить все</button><button onClick={()=>run('mute',()=>api.mute(d.id,!r.muted))}>{r.muted?'Включить микрофон':'Mute'}</button></div><label className="range">Громкость {r.volume??25}<input type="range" min="0" max="50" value={r.volume??25} onChange={e=>run('volume',()=>api.volume(d.id,+e.target.value))}/></label></section><section><h3>DTMF</h3><div className="dtmf">{['1','2','3','4','5','6','7','8','9','*','0','#'].map(x=><button disabled={!inCall||!!busy} onClick={()=>run('dtmf',()=>api.dtmf(d.id,x),false)} key={x}>{x}</button>)}</div></section><p className="hint">* Длительность наблюдается Manager с момента первого обнаружения Call ID.</p></>}
+ {tab==='camera'&&<><section className="first"><div className="row"><label>Сторона <select value={site} onChange={e=>setSite(e.target.value as 'near'|'far')}><option value="near">Near</option><option value="far" disabled={!inCall}>Far</option></select></label><label>Камера <select value={site==='near'?(r.near_camera_source||1):(r.far_camera_source||1)} onChange={e=>run('source',()=>api.cameraSelect(d.id,site,+e.target.value))}>{(site==='near'?c.cam:[1,2,3,4]).map(x=><option key={x}>{x}</option>)}</select></label></div></section><section><h3>PTZ — удерживайте кнопку</h3><div className="ptz"><button {...hold('up')}>↑</button><button {...hold('left')}>←</button><button onClick={()=>move('stop')}>■</button><button {...hold('right')}>→</button><button {...hold('down')}>↓</button></div><div className="row"><button {...hold('zoom-')}>− Zoom</button><button {...hold('zoom+')}>+ Zoom</button></div></section><section><h3>Presets</h3><div className="row">{[1,2,3,4,5].map(x=><button key={x} onClick={()=>run('preset',()=>api.cameraPreset(d.id,site,'go',x))}>{x}</button>)}</div><div className="row"><input type="number" value={preset} min="0" max={site==='near'?99:15} onChange={e=>setPreset(+e.target.value)}/><button onClick={()=>run('go',()=>api.cameraPreset(d.id,site,'go',preset))}>Перейти</button><button className="primary" onClick={()=>run('set',()=>api.cameraPreset(d.id,site,'set',preset))}>Сохранить</button></div></section></>}
+ {tab==='content'&&<><div className="facts"><div>Состояние<b>{r.content_state||'unknown'}</b></div><div>Источник<b>{r.content_source||'—'}</b></div></div><section><h3>Передача контента</h3><div className="sources">{c.content.map(x=><button className={r.content_state==='play'&&r.content_source===x?'active':''} key={x} onClick={()=>run('content',()=>api.content(d.id,'play',x))}>Source {x}<small>{x===6?'People+Content IP':'Video input'}</small></button>)}</div><button className="danger" disabled={r.content_state!=='play'} onClick={()=>run('stop',()=>api.content(d.id,'stop'))}>Остановить контент</button></section><p className="hint">Фактическая доступность входов зависит от модели и конфигурации терминала.</p></>}
+ {tab==='system'&&<><div className="facts"><div>Модель<b>{r.detected_model||d.model}</b></div><div>Firmware<b>{r.firmware||'—'}</b></div><div>Serial<b>{r.serial||'—'}</b></div><div>Last seen<b>{r.last_seen_at?new Date(r.last_seen_at).toLocaleString():'—'}</b></div></div><section><div className="row"><button onClick={()=>run('reconnect',()=>api.connect(d.id))}>Reconnect</button><button onClick={edit}>Изменить настройки</button></div></section><p className="hint">Reboot и другие System Control команды — следующий этап roadmap.</p></>}
+ {tab==='console'&&<section className="first"><h3>Raw API Console</h3><div className="terminal">{out.map((x,i)=><div key={i}>{x}</div>)}</div><form className="console" onSubmit={raw}><span>&gt;</span><input value={cmd} onChange={e=>setCmd(e.target.value)} disabled={!connected}/><button>Run</button></form></section>}{err&&<div className="error sticky">{err}</div>}</aside>
 }
 
-function DeviceModal({ current, onClose, onSaved }: { current?: Device; onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState<DeviceInput>(() => current ? {
-    name: current.name, host: current.host, port: current.port, model: current.model, location: current.location || '', username: current.username, password: '', enabled: current.enabled,
-  } : empty)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const set = <K extends keyof DeviceInput>(key: K, value: DeviceInput[K]) => setForm(v => ({ ...v, [key]: value }))
-  async function submit(e: FormEvent) {
-    e.preventDefault(); setBusy(true); setError('')
-    try { current ? await api.update(current.id, form) : await api.create(form); onSaved(); onClose() }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)) }
-    finally { setBusy(false) }
-  }
-  return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}>
-    <form className="modal" onSubmit={submit}>
-      <div className="modal-head"><div><h2>{current ? 'Редактировать терминал' : 'Добавить терминал'}</h2><p>RealPresence Group 300 / 500 / 700</p></div><button className="icon-button" type="button" onClick={onClose}>×</button></div>
-      <div className="form-grid">
-        <label>Название<input value={form.name} onChange={e => set('name', e.target.value)} required /></label>
-        <label>Расположение<input value={form.location} onChange={e => set('location', e.target.value)} placeholder="Переговорная 201" /></label>
-        <label>IP / hostname<input value={form.host} onChange={e => set('host', e.target.value)} required /></label>
-        <label>SSH порт<input type="number" min="1" max="65535" value={form.port} onChange={e => set('port', Number(e.target.value))} /></label>
-        <label>Модель<select value={form.model} onChange={e => set('model', e.target.value)}><option value="auto">Определить автоматически</option><option value="group300">Group 300</option><option value="group500">Group 500</option><option value="group700">Group 700</option></select></label>
-        <label>SSH пользователь<input value={form.username} onChange={e => set('username', e.target.value)} required /></label>
-        <label className="wide">{current ? 'Новый пароль (оставьте пустым, чтобы не менять)' : 'SSH пароль'}<input type="password" value={form.password} onChange={e => set('password', e.target.value)} required={!current} /></label>
-        <label className="check wide"><input type="checkbox" checked={form.enabled} onChange={e => set('enabled', e.target.checked)} /> Автоподключение</label>
-      </div>
-      {error && <div className="error-box">{error}</div>}
-      <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Отмена</button><button className="button primary" disabled={busy}>{busy ? 'Сохранение…' : 'Сохранить'}</button></div>
-    </form>
-  </div>
-}
+function DeviceTable({items,open,edit}:{items:Device[];open:(d:Device)=>void;edit:(d:Device)=>void}){return <div className="table"><table><thead><tr><th>Терминал</th><th>Модель</th><th>Адрес</th><th>SSH</th><th>Вызовы</th><th>Контент</th><th/></tr></thead><tbody>{items.map(d=><tr key={d.id} onClick={()=>open(d)}><td><b>{d.name}</b><small>{d.location||'—'}</small></td><td>{d.runtime.detected_model||d.model}</td><td><code>{d.host}:{d.port}</code></td><td><Dot s={d.runtime.connection}/> {d.runtime.connection}</td><td>{d.runtime.calls?.length||0}<small>{d.runtime.remote_party}</small></td><td>{d.runtime.content_state||'—'} {d.runtime.content_source?`#${d.runtime.content_source}`:''}</td><td><button onClick={e=>{e.stopPropagation();edit(d)}}>Изменить</button></td></tr>)}</tbody></table>{!items.length&&<p className="muted empty">Терминалы ещё не добавлены.</p>}</div>}
+function Dashboard({items,open}:{items:Device[];open:(d:Device)=>void}){const online=items.filter(x=>x.runtime.connection==='connected').length,calls=items.reduce((n,x)=>n+(x.runtime.calls?.length||0),0),sharing=items.filter(x=>x.runtime.content_state==='play').length,attention=items.filter(x=>x.runtime.connection!=='connected'),active=items.filter(x=>(x.runtime.calls?.length||0)>0);return <><div className="metrics"><div>Подключено<b>{online}<small> / {items.length}</small></b></div><div>Active call legs<b>{calls}</b></div><div>Передают контент<b>{sharing}</b></div><div>Требуют внимания<b>{attention.length}</b></div></div><div className="dash"><section className="card calls"><h2>Активные вызовы</h2>{active.length?<DeviceTable items={active} open={open} edit={open}/>:<p className="muted">Активных вызовов нет.</p>}</section><section className="card"><h2>Парк</h2>{['group300','group500','group700'].map(m=><p className="stat" key={m}><span>{m.replace('group','Group ')}</span><b>{items.filter(x=>family(x)===m).length}</b></p>)}</section><section className="card"><h2>Требуют внимания</h2>{attention.map(x=><button className="attention" onClick={()=>open(x)} key={x.id}><Dot s={x.runtime.connection}/><span>{x.name}<small>{x.runtime.connection}</small></span></button>)}</section></div></>}
+function Audit({a}:{a:AuditEntry[]}){return <div className="table"><table><thead><tr><th>Время</th><th>Операция</th><th>Результат</th><th>Детали</th></tr></thead><tbody>{a.map(x=><tr key={x.id}><td>{new Date(x.created_at).toLocaleString()}</td><td><code>{x.operation}</code></td><td>{x.result}</td><td>{x.detail||x.command||'—'}</td></tr>)}</tbody></table></div>}
 
-function DevicePanel({ device, onClose, onEdit, refresh }: { device: Device; onClose: () => void; onEdit: () => void; refresh: () => void }) {
-  const [destination, setDestination] = useState('')
-  const [command, setCommand] = useState('status')
-  const [terminal, setTerminal] = useState<string[]>([])
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState('')
-  const act = async (name: string, fn: () => Promise<unknown>) => { setBusy(name); setError(''); try { await fn(); setTimeout(refresh, 350) } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally { setBusy('') } }
-  const r = device.runtime
-  const connected = r.connection === 'connected'
-  async function raw(e: FormEvent) { e.preventDefault(); if (!command.trim()) return; await act('raw', async () => { const out = await api.command(device.id, command); setTerminal(v => [...v, `> ${command}`, ...out.output].slice(-100)); setCommand('') }) }
-  return <aside className="drawer">
-    <div className="drawer-head"><div><div className="eyeline">{device.location || 'Терминал'}</div><h2>{device.name}</h2><div className="device-address">{device.host}:{device.port}</div></div><button className="icon-button" onClick={onClose}>×</button></div>
-    <div className="status-banner"><StateDot state={r.connection}/><strong>{r.connection || 'unknown'}</strong>{r.last_error && <span title={r.last_error}> — {r.last_error}</span>}</div>
-    <div className="facts">
-      <div><span>Модель</span><b>{r.detected_model || device.model}</b></div><div><span>Система</span><b>{r.system_name || '—'}</b></div>
-      <div><span>Firmware</span><b>{r.firmware || '—'}</b></div><div><span>Serial</span><b>{r.serial || '—'}</b></div>
-      <div><span>Вызов</span><b>{r.call_state || '—'}</b></div><div><span>Удалённая сторона</span><b>{r.remote_party || '—'}</b></div>
-    </div>
-    <div className="section">
-      <div className="section-title">Подключение</div><div className="button-row"><button className="button secondary" disabled={busy!==''} onClick={() => act('connect',()=>api.connect(device.id))}>Подключить</button><button className="button secondary" disabled={busy!==''} onClick={() => act('disconnect',()=>api.disconnect(device.id))}>Отключить</button><button className="button secondary" onClick={onEdit}>Изменить</button></div>
-    </div>
-    <div className="section">
-      <div className="section-title">Вызов</div><div className="inline-form"><input value={destination} onChange={e=>setDestination(e.target.value)} placeholder="sip:1001@example.local"/><button className="button primary" disabled={!connected||busy!==''||!destination} onClick={()=>act('dial',()=>api.dial(device.id,destination))}>Вызов</button></div>
-      <div className="button-row"><button className="button danger" disabled={!connected||busy!==''} onClick={()=>act('hangup',()=>api.hangup(device.id))}>Завершить</button><button className="button secondary" disabled={!connected||busy!==''} onClick={()=>act('mute',()=>api.mute(device.id,!r.muted))}>{r.muted?'Включить микрофон':'Mute'}</button></div>
-      <label className="range">Громкость <b>{r.volume ?? 25}</b><input type="range" min="0" max="50" value={r.volume ?? 25} disabled={!connected||busy!==''} onChange={e=>act('volume',()=>api.volume(device.id,Number(e.target.value)))}/></label>
-    </div>
-    <div className="section terminal-section"><div className="section-title">API Console</div><div className="terminal">{terminal.length ? terminal.map((l,i)=><div key={i}>{l}</div>) : <span className="terminal-muted">Команды выполняются через текущую SSH API-сессию.</span>}</div><form className="terminal-input" onSubmit={raw}><span>&gt;</span><input value={command} onChange={e=>setCommand(e.target.value)} placeholder="status" disabled={!connected}/><button disabled={!connected||busy!==''}>Run</button></form></div>
-    {error && <div className="error-box drawer-error">{error}</div>}
-  </aside>
-}
-
-function DevicesTable({ devices, onOpen, onEdit }: { devices: Device[]; onOpen: (d: Device) => void; onEdit: (d: Device) => void }) {
-  return <div className="table-wrap"><table><thead><tr><th>Терминал</th><th>Модель</th><th>Адрес</th><th>SSH</th><th>Вызов</th><th>Последняя активность</th><th aria-label="Действия" /></tr></thead><tbody>{devices.map(d=><tr key={d.id} onClick={()=>onOpen(d)}><td><strong>{d.name}</strong><span>{d.location||'Без расположения'}</span></td><td>{d.runtime.detected_model||d.model}</td><td className="mono">{d.host}:{d.port}</td><td><span className="status-cell"><StateDot state={d.runtime.connection}/>{d.runtime.connection}</span></td><td>{d.runtime.call_state||'—'}{d.runtime.remote_party&&<span>{d.runtime.remote_party}</span>}</td><td>{d.runtime.last_seen_at?new Date(d.runtime.last_seen_at).toLocaleString():'—'}</td><td className="row-actions"><button className="button secondary compact" onClick={e=>{e.stopPropagation();onEdit(d)}}>Изменить</button></td></tr>)}</tbody></table>{devices.length===0&&<div className="empty">Терминалы ещё не добавлены.</div>}</div>
-}
-
-function Audit({ entries }: { entries: AuditEntry[] }) {
-  return <div className="table-wrap"><table><thead><tr><th>Время</th><th>Операция</th><th>Device ID</th><th>Результат</th><th>Детали</th></tr></thead><tbody>{entries.map(a=><tr key={a.id}><td>{new Date(a.created_at).toLocaleString()}</td><td className="mono">{a.operation}</td><td className="mono subtle">{a.device_id||'—'}</td><td><span className={`result ${a.result==='success'?'success':'failure'}`}>{a.result}</span></td><td className="truncate" title={a.detail||a.command}>{a.detail||a.command||'—'}</td></tr>)}</tbody></table></div>
-}
-
-export function App() {
-  const [devices,setDevices]=useState<Device[]>([]), [audit,setAudit]=useState<AuditEntry[]>([])
-  const [page,setPage]=useState<'devices'|'audit'>('devices'), [selected,setSelected]=useState<string>(), [modal,setModal]=useState<'new'|'edit'>()
-  const [error,setError]=useState('')
-  const load=useCallback(async()=>{try{setDevices(await api.devices());setError('')}catch(e){setError(e instanceof Error?e.message:String(e))}},[])
-  const loadAudit=useCallback(async()=>{try{setAudit(await api.audit())}catch(e){setError(e instanceof Error?e.message:String(e))}},[])
-  useEffect(()=>{load(); const t=setInterval(load,5000); const es=new EventSource('/api/v1/events'); es.onmessage=()=>load(); return()=>{clearInterval(t);es.close()}},[load])
-  useEffect(()=>{if(page==='audit')loadAudit()},[page,loadAudit])
-  const active=useMemo(()=>devices.find(d=>d.id===selected),[devices,selected])
-  const online=devices.filter(d=>d.runtime.connection==='connected').length, calls=devices.filter(d=>d.runtime.call_state&&d.runtime.call_state!=='idle').length
-  return <div className="app-shell">
-    <aside className="sidebar"><div className="brand"><div className="brand-mark">P</div><div><b>Polycom</b><span>Manager</span></div></div><nav><button className={page==='devices'?'active':''} onClick={()=>setPage('devices')}><span>▦</span>Терминалы</button><button className={page==='audit'?'active':''} onClick={()=>setPage('audit')}><span>≡</span>Аудит</button></nav><div className="sidebar-foot"><span>Group 300 / 500 / 700</span><small>SSH Secure API</small></div></aside>
-    <main><header><div><h1>{page==='devices'?'Терминалы':'Журнал аудита'}</h1><p>{page==='devices'?'Управление RealPresence Group Series':'История подключений и команд'}</p></div>{page==='devices'&&<button className="button primary" onClick={()=>setModal('new')}>+ Добавить терминал</button>}</header>
-      {error&&<div className="error-box page-error">{error}</div>}
-      {page==='devices'?<><div className="metrics"><div><span>Всего</span><b>{devices.length}</b></div><div><span>Подключено</span><b>{online}</b></div><div><span>Активные вызовы</span><b>{calls}</b></div><div><span>Ошибки</span><b>{devices.filter(d=>d.runtime.connection==='auth_error'||d.runtime.connection==='error').length}</b></div></div><section className="content-card"><div className="content-title"><div><h2>Устройства</h2><p>Состояние обновляется автоматически</p></div><button className="button secondary" onClick={load}>Обновить</button></div><DevicesTable devices={devices} onOpen={d=>setSelected(d.id)} onEdit={d=>{setSelected(d.id);setModal('edit')}}/></section></>:<section className="content-card"><div className="content-title"><div><h2>Последние операции</h2><p>До 200 последних записей</p></div><button className="button secondary" onClick={loadAudit}>Обновить</button></div><Audit entries={audit}/></section>}
-    </main>
-    {active&&<DevicePanel device={active} onClose={()=>setSelected(undefined)} onEdit={()=>setModal('edit')} refresh={load}/>} 
-    {modal&&<DeviceModal current={modal==='edit'?active:undefined} onClose={()=>setModal(undefined)} onSaved={load}/>} 
-  </div>
-}
+export function App(){const [items,setItems]=useState<Device[]>([]),[audit,setAudit]=useState<AuditEntry[]>([]),[page,setPage]=useState<Page>('dashboard'),[id,setId]=useState<string>(),[modal,setModal]=useState(false),[err,setErr]=useState('');const load=useCallback(async()=>{try{setItems(await api.devices());setErr('')}catch(e){setErr(String(e))}},[]);useEffect(()=>{load();const t=setInterval(load,5000),es=new EventSource('/api/v1/events');es.onmessage=load;return()=>{clearInterval(t);es.close()}},[load]);useEffect(()=>{if(page==='audit')api.audit().then(setAudit).catch(e=>setErr(String(e)))},[page]);const current=useMemo(()=>items.find(x=>x.id===id),[items,id]);const open=(d:Device)=>setId(d.id);return <div className="app"><aside className="sidebar"><h1><i>P</i> Polycom <small>Manager</small></h1><nav>{(['dashboard','devices','audit'] as Page[]).map(x=><button className={page===x?'active':''} onClick={()=>setPage(x)} key={x}>{x==='dashboard'?'Dashboard':x==='devices'?'Терминалы':'Аудит'}</button>)}</nav><footer>Group 300 / 500 / 700<br/><small>SSH Secure API</small></footer></aside><main><header><div><h1>{page==='dashboard'?'Dashboard':page==='devices'?'Терминалы':'Журнал аудита'}</h1><p>{page==='dashboard'?'Состояние терминалов, вызовов и контента':'RealPresence Group Series'}</p></div>{page!=='audit'&&<button className="primary" onClick={()=>{setId(undefined);setModal(true)}}>+ Добавить терминал</button>}</header>{err&&<div className="error">{err}</div>}{page==='dashboard'&&<Dashboard items={items} open={open}/>} {page==='devices'&&<section className="card"><h2>Устройства</h2><DeviceTable items={items} open={open} edit={d=>{setId(d.id);setModal(true)}}/></section>}{page==='audit'&&<section className="card"><h2>Последние операции</h2><Audit a={audit}/></section>}</main>{current&&<DevicePanel d={current} close={()=>setId(undefined)} edit={()=>setModal(true)} reload={load}/>} {modal&&<DeviceModal device={current} close={()=>setModal(false)} saved={load}/>}</div>}
