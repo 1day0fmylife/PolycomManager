@@ -7,3 +7,4 @@
 master.key
 hostkeys.json
 .DS_Store
+internal/webui/dist
