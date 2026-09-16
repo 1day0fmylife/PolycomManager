@@ -24,9 +24,6 @@ func (c *Client) Init(ctx context.Context, sessionName string) error {
 	if _, err := c.Raw(ctx, fmt.Sprintf("session name %s", safeToken(sessionName))); err != nil {
 		return fmt.Errorf("set session name: %w", err)
 	}
-	// Notification registrations are best-effort. Firmware and system configuration can
-	// differ between Group Series installations, and a missing optional notification
-	// must not prevent the device from being managed.
 	for _, cmd := range []string{
 		"notify callstatus",
 		"notify mutestatus",
@@ -197,14 +194,7 @@ func (c *Client) CameraMove(ctx context.Context, site, direction string) error {
 		return errors.New("invalid camera direction")
 	}
 	if direction == "stop" {
-		// The documented `camera <near|far> stop` command can return no feedback.
-		// Use the optional-response path so releasing a PTZ control does not block
-		// for the normal command timeout.
-		lines, err := c.ssh.ExecuteOptional(ctx, fmt.Sprintf("camera %s stop", site), 500*time.Millisecond)
-		if err != nil {
-			return err
-		}
-		return responseError(lines)
+		return c.ssh.ExecuteNoWait(ctx, fmt.Sprintf("camera %s stop", site))
 	}
 	return c.execOK(ctx, fmt.Sprintf("camera %s move %s", site, direction))
 }
@@ -230,7 +220,11 @@ func (c *Client) SendDTMF(ctx context.Context, digit string) error {
 	if len(digit) != 1 || !strings.Contains("0123456789*#", digit) {
 		return errors.New("DTMF digit must be one of 0-9, * or #")
 	}
-	return c.execOK(ctx, "gendial "+digit)
+	lines, err := c.ssh.ExecuteOptional(ctx, "gendial "+digit, 80*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	return responseError(lines)
 }
 
 func (c *Client) StartContent(ctx context.Context, source int) error {
@@ -344,9 +338,6 @@ func ParseCallInfo(lines []string) []CallInfo {
 		if len(parts) < 7 {
 			continue
 		}
-		// The documented wire format ends with speed/status/mute/direction/type.
-		// Some firmware omits an empty far-site-name field, so parse from the
-		// right instead of relying on one fixed field count.
 		n := len(parts)
 		ci := CallInfo{
 			CallID:           parts[0],
